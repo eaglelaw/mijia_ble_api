@@ -122,12 +122,14 @@
     }
 #endif
 
-#define CRITICAL_SECTION_ENTER()
-#define CRITICAL_SECTION_EXIT()
+#include "log.h"
+
+#define CRITICAL_SECTION_ENTER()    //plt_critical_enter()
+#define CRITICAL_SECTION_EXIT()     //plt_critical_exit(0)
 
 #if MI_LOG_ENABLED==1
-#define MI_PRINTF(...)                      mible_log_printf(__VA_ARGS__)
-#define MI_HEXDUMP(array_base, array_size)  mible_log_hexdump(array_base, array_size)
+#define MI_PRINTF(...)                      LOG(__VA_ARGS__)
+#define MI_HEXDUMP(array_base, array_size)  //mible_log_hexdump(array_base, array_size)
 #else
 #define MI_PRINTF(...)
 #define MI_HEXDUMP(base_addr, bytes)
