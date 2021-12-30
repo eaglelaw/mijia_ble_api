@@ -9,6 +9,20 @@
 
 #include "access_extern.h"
 #include "net_extern.h"
+#include "MS_config_api.h"
+#include "gatt.h"
+#include "gatt_uuid.h"
+#include "hci.h"
+#include "hci_tl.h"
+#include "ll.h"
+#include "gap.h"
+
+#include "gapgattserver.h"
+#include "gattservapp.h"
+#include "devinfoservice.h"
+#include "bleMesh.h"
+#include "mible_log.h"
+
 //#include <trace.h>
 //#include "mesh_api.h"
 //#include "mesh_sdk.h"
@@ -48,6 +62,8 @@
 #define MI_GATT_TIMEOUT                         20000
 #define MI_REGSUCC_TIMEOUT                      5000
 
+
+
 /* mi inner message type */
 typedef enum
 {
@@ -67,20 +83,24 @@ typedef struct
 } mi_inner_msg_t;
 
 /* app message parameters */
-static uint8_t mi_event;
-//static plt_os_queue_handle_t mi_event_queue_handle;
-//static plt_os_queue_handle_t mi_queue_handle;
+//static uint8_t mi_event;
 
-static uint8_t is_provisioned = 0;
+//extern gapDevDiscReq_t bleMesh_scanparam;
+//extern gapAdvertisingParams_t bleMesh_advparam;
+//extern UCHAR bleMesh_DiscCancel ;
+static uint8_t is_provisioned = false;
 //static uint8_t conn_handle = 0xFF;        /* handle of the last opened LE connection */
 /* mible state, avoid multiple initialize */
-static bool mible_start = FALSE;
-static bool is_initialized = false;
+//static bool mible_start = FALSE;
+//static bool is_initialized = false;
 static bool is_prov_complete = false;
 /* connect paramenters */
 static uint16_t mible_conn_handle = 0xFFFF;
 /* connect timer */
 static void *mible_conn_timer = NULL;
+extern uint8_t bleMesh_TaskID;
+EM_timer_handle prov_thandle;
+
 
 /* pre subscribe address */
 #if defined(MI_MESH_TEMPLATE_LIGHTNESS) || defined(MI_MESH_TEMPLATE_LIGHTCTL)
@@ -100,8 +120,7 @@ static uint16_t pre_sub_addr[] = {0xFE03};
 //static uint16_t pre_sub_addr_cnt = 0;
 extern MS_ACCESS_MODEL_HANDLE   UI_generic_onoff_server_model_handle;
 extern mible_status_t mible_record_init(void);
-//extern T_GAP_CAUSE le_vendor_set_priority(T_GAP_VENDOR_PRIORITY_PARAM *p_priority_param);
-#if 0
+
 static void process_mesh_node_init_event(void)
 {
     mible_mesh_template_map_t node_map[5] = {
@@ -185,402 +204,33 @@ static void process_mesh_node_init_event(void)
     };
     mible_mesh_node_init_t node_info;
     node_info.map = (mible_mesh_template_map_t *)&node_map;
-    node_info.provisioned = is_provisioned;//(cb_type == PROV_CB_TYPE_PROV) ? 1:0;
-    node_info.lpn_node = MI_MESH_LOW_POWER_NODE;
-    node_info.address = mesh_node.unicast_addr;
-    node_info.ivi = iv_index_get();
-    //is_provisioned = node_info.provisioned;
     
+    node_info.lpn_node = 0;
+	MS_NET_ADDR uaddr;
+	API_RESULT  retval;
+	retval = MS_access_cm_get_primary_unicast_address(&uaddr);
+	if (retval == API_SUCCESS)
+	{
+		if (MS_NET_ADDR_UNASSIGNED != uaddr)
+        {
+            /* Set Provisioning is not Required */
+            is_provisioned = true;
+        }
+		else
+		{
+			is_provisioned = false;
+		}
+	}
+	node_info.provisioned = is_provisioned;//(cb_type == PROV_CB_TYPE_PROV) ? 1:0;
+	node_info.address = uaddr;
+//    node_info.address = mesh_node.unicast_addr;
+    node_info.ivi = ms_iv_index.iv_index&0x01;
+    //is_provisioned = node_info.provisioned;
+    MI_LOG_INFO("node state %d, addr %04x, ivi %08x\n", is_provisioned,
+                uaddr, node_info.ivi);
+//    MS_private_server_adv_start(0x2);
     mible_mesh_event_callback(MIBLE_MESH_EVENT_DEVICE_INIT_DONE, &node_info);
 }
-
-static void process_mesh_node_reset(prov_cb_type_t cb_type, prov_cb_data_t cb_data)
-{
-    mible_mesh_event_params_t evt_vendor_param;
-
-    evt_vendor_param.config_msg.opcode.opcode = MIBLE_MESH_MSG_CONFIG_NODE_RESET;
-    evt_vendor_param.config_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_SIG;
-    is_provisioned = 0;
-
-    mible_mesh_event_callback(MIBLE_MESH_EVENT_CONFIG_MESSAGE_CB, &evt_vendor_param);
-}
-
-/******************************************************************
- * @fn      prov_cb
- * @brief   Provisioning callbacks are handled in this function.
- *
- * @param   cb_data  -  @ref TProvisioningCbData
- * @return  the operation result
- */
-bool prov_cb(prov_cb_type_t cb_type, prov_cb_data_t cb_data)
-{
-    MI_LOG_INFO("prov_cb: type = %d", cb_type);
-
-    switch (cb_type)
-    {
-    case PROV_CB_TYPE_PB_ADV_LINK_STATE:
-        break;
-    case PROV_CB_TYPE_UNPROV:
-        /* stack ready or node reset*/
-        if(is_provisioned){
-            process_mesh_node_reset(cb_type, cb_data);
-        }else{
-            is_provisioned = false;
-            is_initialized = true;
-        }
-        //mi_unprov();
-        break;
-    case PROV_CB_TYPE_START:
-        break;
-    case PROV_CB_TYPE_COMPLETE:
-        is_provisioned = true;
-        process_mesh_node_init_event();
-        for(int i=0; i<sizeof(pre_sub_addr)/2; i++)
-            mible_mesh_device_set_presub_address(MIBLE_MESH_OP_ADD, pre_sub_addr[i]);
-
-        /** switch beacon & service adv */
-        if (mesh_node.features.snb)
-        {
-            beacon_start();
-        }
-        break;
-    case PROV_CB_TYPE_FAIL:
-        break;
-    case PROV_CB_TYPE_PROV:
-        /* stack ready */
-        is_provisioned = true;
-        is_initialized = true;
-        rpl_clear(); //clear rpl after reboot
-        for(int i=0; i<sizeof(pre_sub_addr)/2; i++)
-            mible_mesh_device_set_presub_address(MIBLE_MESH_OP_ADD, pre_sub_addr[i]);
-        break;
-    default:
-        break;
-    }
-    return true;
-}
-
-bool iv_index_cb(iv_index_cb_type_t type, iv_index_cb_data_t data)
-{
-    MI_LOG_INFO("iv_index_cb: type = %d", type);
-    switch(type)
-    {
-        case MESH_IV_INDEX_UPDATE:{
-                MI_LOG_INFO("iv index update: iv_index = 0x%x, iv_update_flag = %d", data.iv_index, data.iv_index_update_flag);
-                mible_mesh_event_params_t evt_vendor_param;
-                evt_vendor_param.mesh_iv.iv_index = data.iv_index;
-                evt_vendor_param.mesh_iv.flags = data.iv_index_update_flag;
-                mible_mesh_event_callback(MIBLE_MESH_EVENT_IV_UPDATE, &evt_vendor_param);
-            }
-            break;
-        default:
-            break;
-    }
-    return true;
-}
-
-void mi_default_config(void)
-{
-    mesh_node.ttl = MI_DEFAULT_TTL;
-    mesh_node.net_trans_count = MI_NET_RETRANS_COUNT;
-    mesh_node.net_trans_steps = MI_NET_RETRANS_INTERVAL_STEPS;
-    mesh_node.relay_retrans_count = MI_RELAY_RETRANS_COUNT;
-    mesh_node.relay_retrans_steps = MI_RELAY_RETRANS_INTERVAL_STEPS;
-    mesh_node.nmc_size = MI_NMC_SIZE;
-    mesh_node.seq_siv = MI_IV_UPDATE_TRIGGER_SEQUENCE_NUM;
-    mesh_node.trans_retrans_base = MI_TIME_RECV_SEG_ACK;
-    mesh_node.trans_retrans_seg_factor = 0;
-    mesh_node.trans_ack_base = MI_TIME_SEND_SEG_ACK;
-    mesh_node.trans_ack_seg_factor = 0;
-    mesh_node.relay_parallel_max = MI_GAP_SCHED_RELAY_PARALLEL_MAX_NUM;
-/*
-    uint16_t scan_window = MI_GAP_SCHED_SCAN_WINDOW;
-    uint16_t scan_interval = MI_GAP_SCHED_SCAN_INTERVAL;
-    gap_sched_params_set(GAP_SCHED_PARAMS_SCAN_WINDOW, &scan_window, sizeof(uint16_t));
-    gap_sched_params_set(GAP_SCHED_PARAMS_SCAN_INTERVAL, &scan_interval, sizeof(uint16_t));
-*/
-    uint8_t task_num = MI_GAP_SCHED_TASK_NUM;
-    gap_sched_params_set(GAP_SCHED_PARAMS_TASK_NUM, &task_num, sizeof(task_num));
-}
-
-/**
- *@brief    generic message, Mesh model 3.2, 4.2, 5.2, 6.3, or 7 Summary.
- *          report event: MIBLE_MESH_EVENT_GENERIC_OPTION_CB, data: mible_mesh_access_message_t.
- *@param    [in] param : control parameters corresponding to node
- *          according to opcode, generate a mesh message; extral params: ack_opcode, tid, get_or_set.
- *@return   0: success, negetive value: failure
- */
-
-int rtk_mesh_msg_relay(mesh_msg_t *pargs)
-{
-    pargs->ttl -= 1;
-    pargs->net_trans_count = 7;
-    pargs->net_trans_steps = 0;
-    MI_LOG_DEBUG("rtk_mesh_msg_relay. src %04x, dst %04x, opcode %06x, data:\n",
-                pargs->src, pargs->dst, pargs->access_opcode);
-    MI_LOG_HEXDUMP(pargs->pbuffer, pargs->msg_len);
-    
-    return access_send(pargs);
-}
-#endif
-
-/* sig models */
-//#if defined(MI_MESH_TEMPLATE_LIGHTNESS) || defined(MI_MESH_TEMPLATE_LIGHTCTL) || \
-//    defined(MI_MESH_TEMPLATE_ONE_KEY_SWITCH) || defined(MI_MESH_TEMPLATE_TWO_KEY_SWITCH) || \
-//    defined(MI_MESH_TEMPLATE_THREE_KEY_SWITCH) || defined(MI_MESH_TEMPLATE_FAN)
-//#include "generic_on_off.h"
-//static mesh_model_info_t generic_on_off_server;
-/**
- * @brief generic on/off server data callback
- * @param[in] pmodel_info: generic on/off server model handler
- * @param[in] type: data type
- * @param[in, out] pargs: data need to process
- */
- #if 0
-static int32_t generic_on_off_server_data(const mesh_model_info_p pmodel_info, uint32_t type,
-                                          void *pargs)
-{
-    mesh_msg_t *pmesh_msg = pargs;
-    mible_mesh_event_params_t evt_generic_param;
-    
-    memset(&evt_generic_param.generic_msg, 0, sizeof(mible_mesh_access_message_t));
-    
-    evt_generic_param.generic_msg.opcode.opcode = pmesh_msg->access_opcode;
-    if(pmesh_msg->access_opcode == MIBLE_MESH_MSG_GENERIC_ONOFF_SET || 
-       pmesh_msg->access_opcode == MIBLE_MESH_MSG_GENERIC_ONOFF_SET_UNACKNOWLEDGED){
-        uint8_t *pbuffer = pmesh_msg->pbuffer + pmesh_msg->msg_offset + ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-        evt_generic_param.generic_msg.buf_len = pmesh_msg->msg_len - ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-        memcpy(evt_generic_param.generic_msg.buff, pbuffer, evt_generic_param.generic_msg.buf_len);
-        
-    }
-    evt_generic_param.generic_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_SIG;
-    evt_generic_param.generic_msg.meta_data.dst_addr = pmesh_msg->dst;
-    evt_generic_param.generic_msg.meta_data.src_addr = pmesh_msg->src;
-    evt_generic_param.generic_msg.meta_data.elem_index = pmodel_info->element_index;
-
-    mible_mesh_event_callback(MIBLE_MESH_EVENT_GENERIC_MESSAGE_CB, &evt_generic_param);
-    
-    /* send relay msg */
-#if MI_MESH_LOW_POWER_NODE
-    if(pmesh_msg->dst >= 0xC000)
-        rtk_mesh_msg_relay(pmesh_msg);
-#endif
-    return 0;
-}
-#endif
-#if defined(MI_MESH_TEMPLATE_TWO_KEY_SWITCH) || defined(MI_MESH_TEMPLATE_THREE_KEY_SWITCH)
-static mesh_model_info_t generic_on_off_server_2st;
-#if defined(MI_MESH_TEMPLATE_THREE_KEY_SWITCH)
-static mesh_model_info_t generic_on_off_server_3rd;
-#endif //defined(MI_MESH_TEMPLATE_THREE_KEY_SWITCH)
-#endif //defined(MI_MESH_TEMPLATE_TWO_KEY_SWITCH) || defined(MI_MESH_TEMPLATE_THREE_KEY_SWITCH)
-//#if defined(MI_MESH_TEMPLATE_LIGHTNESS) || defined(MI_MESH_TEMPLATE_LIGHTCTL)
-//#include "light_lightness.h"
-//static mesh_model_info_t light_lightness_server;
-/**
- * @brief light lightness server data callback
- * @param[in] pmodel_info: light lightness server model handler
- * @param[in] type: data type
- * @param[in, out] pargs: data need to process
- */
-#if 0
-static int32_t light_lightness_server_data(const mesh_model_info_p pmodel_info, uint32_t type,
-                                           void *pargs)
-{
-    mesh_msg_t *pmesh_msg = pargs;
-    mible_mesh_event_params_t evt_generic_param;
-    
-    memset(&evt_generic_param.generic_msg, 0, sizeof(mible_mesh_access_message_t));
-    evt_generic_param.generic_msg.opcode.opcode = pmesh_msg->access_opcode;
-    if(pmesh_msg->access_opcode == MIBLE_MESH_MSG_LIGHT_LIGHTNESS_SET || 
-       pmesh_msg->access_opcode == MIBLE_MESH_MSG_LIGHT_LIGHTNESS_SET_UNACKNOWLEDGED){
-        uint8_t *pbuffer = pmesh_msg->pbuffer + pmesh_msg->msg_offset + ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-        evt_generic_param.generic_msg.buf_len = pmesh_msg->msg_len - ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-        memcpy(evt_generic_param.generic_msg.buff, pbuffer, evt_generic_param.generic_msg.buf_len);
-    }
-    evt_generic_param.generic_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_SIG;
-    evt_generic_param.generic_msg.meta_data.dst_addr = pmesh_msg->dst;
-    evt_generic_param.generic_msg.meta_data.src_addr = pmesh_msg->src;
-    evt_generic_param.generic_msg.meta_data.elem_index = pmodel_info->element_index;
-
-    mible_mesh_event_callback(MIBLE_MESH_EVENT_GENERIC_MESSAGE_CB, &evt_generic_param);
-    
-    /* send relay msg */
-#if MI_MESH_LOW_POWER_NODE
-    if(pmesh_msg->dst >= 0xC000)
-        rtk_mesh_msg_relay(pmesh_msg);
-#endif
-    return 0;
-}
-#endif
- 
-
-//#if defined(MI_MESH_TEMPLATE_LIGHTCTL)
-//#include "light_ctl.h"
-//static mesh_model_info_t light_ctl_temperature_server;
-/**
- * @brief light ctl server data callback
- * @param[in] pmodel_info: light ctl server model handler
- * @param[in] type: data type
- * @param[in, out] pargs: data need to process
- */
-
-//static int32_t light_ctl_server_data(const mesh_model_info_p pmodel_info, uint32_t type,
-//                                     void *pargs)
-//{
-//    mesh_msg_t *pmesh_msg = pargs;
-//    mible_mesh_event_params_t evt_generic_param;
-//    
-//    memset(&evt_generic_param.generic_msg, 0, sizeof(mible_mesh_access_message_t));
-//    evt_generic_param.generic_msg.opcode.opcode = pmesh_msg->access_opcode;
-//    if(pmesh_msg->access_opcode == MIBLE_MESH_MSG_LIGHT_CTL_TEMPERATURE_SET || 
-//       pmesh_msg->access_opcode == MIBLE_MESH_MSG_LIGHT_CTL_TEMPERATURE_SET_UNACKNOWLEDGED){
-//        uint8_t *pbuffer = pmesh_msg->pbuffer + pmesh_msg->msg_offset + ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-//        evt_generic_param.generic_msg.buf_len = pmesh_msg->msg_len - ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-//        memcpy(evt_generic_param.generic_msg.buff, pbuffer, evt_generic_param.generic_msg.buf_len);
-//    }
-//    evt_generic_param.generic_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_SIG;
-//    evt_generic_param.generic_msg.meta_data.dst_addr = pmesh_msg->dst;
-//    evt_generic_param.generic_msg.meta_data.src_addr = pmesh_msg->src;
-//    evt_generic_param.generic_msg.meta_data.elem_index = pmodel_info->element_index;
-//    
-//    mible_mesh_event_callback(MIBLE_MESH_EVENT_GENERIC_MESSAGE_CB, &evt_generic_param);
-//    
-//    /* send relay msg */
-//#if MI_MESH_LOW_POWER_NODE
-//    if(pmesh_msg->dst >= 0xC000)
-//        rtk_mesh_msg_relay(pmesh_msg);
-//#endif
-//    return 0;
-//}
-
-#if 0
-/* miot server model */
-static mesh_model_info_t miot_server;
-static mesh_model_info_t mijia_server;
-/**
- * @brief miot server (038F0000) data callback
- * @param[in] pmodel_info: light lightness server model handler
- * @param[in] type: data type
- * @param[in, out] pargs: data need to process
- */
-#include "mesh_auth/mible_mesh_vendor.h"
-static int32_t miot_server_data(const mesh_model_info_p pmodel_info, uint32_t type,
-                         void *pargs)
-{
-    mesh_msg_t *pmesh_msg = pargs;
-    mible_mesh_event_params_t evt_vendor_param;
-    
-    memset(&evt_vendor_param.generic_msg, 0, sizeof(mible_mesh_access_message_t));
-    evt_vendor_param.generic_msg.opcode.opcode = pmesh_msg->access_opcode >> 16;
-    
-    uint8_t *pbuffer = pmesh_msg->pbuffer + pmesh_msg->msg_offset + ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-#if 0
-    static int last_tid_2_1 = -1;
-    static int last_tid_3_1 = -1;
-    mible_mesh_vendor_message_t *p_vendor = (mible_mesh_vendor_message_t *)pbuffer;
-    if(p_vendor->action.siid == 2 && p_vendor->action.aiid == 1){
-        if(last_tid_2_1 == p_vendor->action.tid)
-            return -1;
-        else
-            last_tid_2_1 = p_vendor->action.tid;
-    }else if(p_vendor->action.siid == 3 && p_vendor->action.aiid == 1){
-        if(last_tid_3_1 == p_vendor->action.tid)
-            return -1;
-        else
-            last_tid_3_1 = p_vendor->action.tid;
-    }
-#endif
-    evt_vendor_param.generic_msg.buf_len = pmesh_msg->msg_len - ACCESS_OPCODE_SIZE(pmesh_msg->access_opcode);
-    if(evt_vendor_param.generic_msg.buf_len > 8)
-        evt_vendor_param.generic_msg.p_buf = pbuffer;
-    else
-        memcpy(evt_vendor_param.generic_msg.buff, pbuffer, evt_vendor_param.generic_msg.buf_len);
-    evt_vendor_param.generic_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_XIAOMI;
-    evt_vendor_param.generic_msg.meta_data.dst_addr = pmesh_msg->dst;
-    evt_vendor_param.generic_msg.meta_data.src_addr = pmesh_msg->src;
-    evt_vendor_param.generic_msg.meta_data.elem_index = 0;
-
-    mible_mesh_event_callback(MIBLE_MESH_EVENT_GENERIC_MESSAGE_CB, &evt_vendor_param);
-    
-    /* send relay msg */
-#if MI_MESH_LOW_POWER_NODE
-    if(pmesh_msg->dst >= 0xC000)
-        rtk_mesh_msg_relay(pmesh_msg);
-#endif
-    return 0;
-}
-
-/**
- * @brief mijia server (038F0002) data callback
- * @param[in] pmodel_info: light lightness server model handler
- * @param[in] type: data type
- * @param[in, out] pargs: data need to process
- */
-static int32_t mijia_server_data(const mesh_model_info_p pmodel_info, uint32_t type,
-                                 void *pargs)
-{
-    return 0;
-}
-#endif
-/* health server model */
-//static mesh_model_info_t health_server_model;
-#if 0
-static bool cfg_server_receive_peek(mesh_msg_p pmesh_msg)
-{
-    bool ret = true;
-    uint8_t *pbuffer = pmesh_msg->pbuffer + pmesh_msg->msg_offset;
-    
-    mible_mesh_event_params_t evt_vendor_param;
-    memset(&evt_vendor_param.config_msg, 0, sizeof(mible_mesh_config_status_t));
-
-    evt_vendor_param.config_msg.opcode.opcode = pmesh_msg->access_opcode;
-    evt_vendor_param.config_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_SIG;
-    evt_vendor_param.config_msg.meta_data.dst_addr = pmesh_msg->dst;
-    evt_vendor_param.config_msg.meta_data.src_addr = pmesh_msg->src;
-    evt_vendor_param.config_msg.meta_data.elem_index = pmesh_msg->dst - mesh_node.unicast_addr;
-    
-    switch (pmesh_msg->access_opcode)
-    {
-    case MIBLE_MESH_MSG_CONFIG_MODEL_SUBSCRIPTION_ADD:
-    case MIBLE_MESH_MSG_CONFIG_MODEL_SUBSCRIPTION_OVERWRITE:
-    case MIBLE_MESH_MSG_CONFIG_MODEL_SUBSCRIPTION_DELETE:
-    case MIBLE_MESH_MSG_CONFIG_MODEL_SUBSCRIPTION_DELETE_ALL:
-    {
-        cfg_model_sub_add_t *pmsg = (cfg_model_sub_add_t *)pbuffer;
-        evt_vendor_param.config_msg.model_sub_set.elem_addr = pmsg->element_addr;
-        evt_vendor_param.config_msg.model_sub_set.address = pmsg->addr;
-        if(pmesh_msg->msg_len == sizeof(cfg_model_sub_add_t)){
-            evt_vendor_param.config_msg.model_sub_set.model_id.model_id = pmsg->model_id >> 16;
-            evt_vendor_param.config_msg.model_sub_set.model_id.company_id = pmsg->model_id & 0xffff;
-        }else{
-            evt_vendor_param.config_msg.model_sub_set.model_id.model_id = pmsg->model_id & 0xffff;
-            evt_vendor_param.config_msg.model_sub_set.model_id.company_id = MIBLE_MESH_COMPANY_ID_SIG;
-        }
-
-        mible_mesh_event_callback(MIBLE_MESH_EVENT_CONFIG_MESSAGE_CB, &evt_vendor_param);
-    }
-        break;
-#if !MINIMIZE_FLASH_SIZE
-    case MIBLE_MESH_MSG_CONFIG_RELAY_SET:
-    {
-        cfg_relay_set_t *pmsg = (cfg_relay_set_t *)pbuffer;
-        evt_vendor_param.config_msg.relay_set.relay = pmsg->state;
-        evt_vendor_param.config_msg.relay_set.relay_retrans_cnt = pmsg->count;
-        evt_vendor_param.config_msg.relay_set.relay_retrans_intvlsteps = pmsg->steps;
-        mible_mesh_event_callback(MIBLE_MESH_EVENT_CONFIG_MESSAGE_CB, &evt_vendor_param);
-        ret = cfg_server_receive(pmesh_msg);
-    }
-        break;
-#endif
-    default:
-        MI_LOG_DEBUG("access_opcode : 0x%04x!", pmesh_msg->access_opcode);
-        ret = cfg_server_receive(pmesh_msg);
-        break;
-    }
-    return ret;
-}
-#endif
 
 //MS_ACCESS_MODEL_CB         generic_onoff_server_cb;
 //MS_GENERIC_SERVER_CB       generic_server_appl_cb;
@@ -629,6 +279,122 @@ static bool cfg_server_receive_peek(mesh_msg_p pmesh_msg)
 ////    generic_onoff_server_model_handle = *model_handle;
 //	return retval;
 //}
+API_RESULT UI_app_config_server_callback (
+    /* IN */ MS_ACCESS_MODEL_HANDLE*  handle,
+    /* IN */ MS_NET_ADDR               saddr,
+    /* IN */ MS_NET_ADDR               daddr,
+    /* IN */ MS_SUBNET_HANDLE          subnet_handle,
+    /* IN */ MS_APPKEY_HANDLE          appkey_handle,
+    /* IN */ UINT32                    opcode,
+    /* IN */ UCHAR*                    data_parm,
+    /* IN */ UINT16                    data_len,
+    /* IN */ API_RESULT                retval,
+    /* IN */ UINT32                    response_opcode,
+    /* IN */ UCHAR*                    response_buffer,
+    /* IN */ UINT16                    response_buffer_len)
+{
+	
+//	uint8_t tx_state;
+//    UCHAR  proxy_state;
+    #ifdef EASY_BOUNDING
+    MS_ACCESS_ADDRESS         addr;
+    #endif
+    MI_LOG_INFO("[APP_CFG_SERV_CB] %04x \n", opcode);
+	mible_mesh_event_params_t evt_config_param;
+	MS_NET_ADDR uaddr;
+	retval = MS_access_cm_get_primary_unicast_address(&uaddr);
+	memset(&evt_config_param.config_msg, 0, sizeof(mible_mesh_config_status_t));
+	evt_config_param.config_msg.opcode.opcode = opcode;
+	evt_config_param.config_msg.opcode.company_id = MIBLE_MESH_COMPANY_ID_SIG;
+	evt_config_param.config_msg.meta_data.dst_addr = daddr;
+	evt_config_param.config_msg.meta_data.src_addr = saddr;
+	evt_config_param.config_msg.meta_data.appkey_index = appkey_handle;
+	evt_config_param.config_msg.meta_data.elem_index = daddr - uaddr;
+	
+    switch (opcode)
+    {
+    case MS_ACCESS_CONFIG_NODE_RESET_OPCODE:
+
+    case MS_ACCESS_CONFIG_MODEL_SUBSCRIPTION_ADD_OPCODE:
+
+    case MS_ACCESS_CONFIG_MODEL_SUBSCRIPTION_DELETE_OPCODE:
+
+    case MS_ACCESS_CONFIG_NETWORK_TRANSMIT_SET_OPCODE:
+
+    case MS_ACCESS_CONFIG_APPKEY_ADD_OPCODE:
+
+    case MS_ACCESS_CONFIG_MODEL_APP_BIND_OPCODE:
+		evt_config_param.config_msg.model_sub_set.elem_addr = daddr;
+		evt_config_param.config_msg.model_sub_set.address = uaddr;
+		evt_config_param.config_msg.model_sub_set.model_id.model_id = MIBLE_MESH_MODEL_ID_CONFIGURATION_SERVER;
+		evt_config_param.config_msg.model_sub_set.model_id.company_id = MIBLE_MESH_COMPANY_ID_SIG;
+        break;
+	case MS_ACCESS_CONFIG_RELAY_SET_OPCODE:
+		evt_config_param.config_msg.relay_set.relay = ms_features|(1<<MS_FEATURE_RELAY);
+		evt_config_param.config_msg.relay_set.relay_retrans_cnt = ms_tx_state[MS_RELAY_TX_STATE].tx_count;
+        evt_config_param.config_msg.relay_set.relay_retrans_intvlsteps = ms_tx_state[MS_RELAY_TX_STATE].tx_steps;
+		
+		break;
+
+    default:
+        break;
+    }
+	mible_mesh_event_callback(MIBLE_MESH_EVENT_CONFIG_MESSAGE_CB, &evt_config_param);
+    return API_SUCCESS;
+}
+
+API_RESULT UI_register_foundation_model_servers
+(
+    MS_ACCESS_ELEMENT_HANDLE element_handle
+)
+{
+    /* Configuration Server */
+    MS_ACCESS_MODEL_HANDLE   UI_config_server_model_handle;
+    API_RESULT retval;
+    #ifdef USE_HEALTH
+    /* Health Server */
+    MS_ACCESS_MODEL_HANDLE   UI_health_server_model_handle;
+    UINT16                       company_id;
+    MS_HEALTH_SERVER_SELF_TEST* self_tests;
+    UINT32                       num_self_tests;
+    #endif
+//    MI_LOG_INFO("In Model Server - Foundation Models\n");
+    retval = MS_config_server_init(element_handle, &UI_config_server_model_handle);
+//    MI_LOG_INFO("Config Model Server Registration Status: 0x%04X\n", retval);
+    #ifdef USE_HEALTH
+    /* Health Server */
+    company_id = MS_DEFAULT_COMPANY_ID;
+    self_tests = &UI_health_server_self_tests[0];
+    num_self_tests = sizeof(UI_health_server_self_tests)/sizeof(MS_HEALTH_SERVER_SELF_TEST);
+    retval = MS_health_server_init
+             (
+                 element_handle,
+                 &UI_health_server_model_handle,
+                 company_id,
+                 self_tests,
+                 num_self_tests,
+                 UI_health_server_cb
+             );
+
+    if (API_SUCCESS == retval)
+    {
+        MI_LOG_INFO(
+            "Health Server Initialized. Model Handle: 0x%04X\n",
+            UI_health_server_model_handle);
+    }
+    else
+    {
+        MI_LOG_INFO(
+            "[ERR] Sensor Server Initialization Failed. Result: 0x%04X\n",
+            retval);
+    }
+
+    #endif
+    return retval;
+}
+
+
+
 static int init_models(void)
 {
     uint16_t result = 0;
@@ -636,8 +402,8 @@ static int init_models(void)
 	MS_ACCESS_NODE_ID node_id;
     MS_ACCESS_ELEMENT_DESC   element;
     MS_ACCESS_ELEMENT_HANDLE element_handle;
-	MS_ACCESS_ELEMENT_HANDLE element_handle1;
-	MS_ACCESS_ELEMENT_HANDLE element_handle2;
+//	MS_ACCESS_ELEMENT_HANDLE element_handle1;
+//	MS_ACCESS_ELEMENT_HANDLE element_handle2;
     API_RESULT retval;
 	
 	/* Create Node */
@@ -665,8 +431,14 @@ static int init_models(void)
         /* Register Generic OnOff model server */
         retval = UI_register_generic_onoff_model_server(element_handle);
     }
-
+	APP_config_server_CB_init(UI_app_config_server_callback); //config cb
     return result;
+}
+void timeout_prov_state_cb (void* args, UINT16 size)
+{
+    prov_thandle = EM_TIMER_HANDLE_INIT_VAL;
+//	LOG("node state\n");
+    process_mesh_node_init_event();
 }
 
 /**
@@ -676,8 +448,8 @@ static int init_models(void)
  */
 int mible_mesh_device_init_stack(void)
 {
-	MS_ACCESS_NODE_ID node_id;
-  MS_CONFIG* config_ptr;
+//	MS_ACCESS_NODE_ID node_id;
+  	MS_CONFIG* config_ptr;
 	API_RESULT retval;
 	#ifdef MS_HAVE_DYNAMIC_CONFIG
     MS_CONFIG  config;
@@ -687,15 +459,35 @@ int mible_mesh_device_init_stack(void)
     #else
     config_ptr = NULL;
 	#endif /* MS_HAVE_DYNAMIC_CONFIG */
+
+
+	/* Initialize OSAL */
+    EM_os_init();
+    /* Initialize Debug Module */
+    EM_debug_init();
+    /* Initialize Timer Module */
+    EM_timer_init();
+    timer_em_init();
+    #if defined ( EM_USE_EXT_TIMER )
+    EXT_cbtimer_init();
+    ext_cbtimer_em_init();
+    #endif
 	
 	/* Initialize utilities */
 	nvsto_init(NVS_FLASH_BASE1,NVS_FLASH_BASE2);
     /* Initialize Mesh Stack */
     MS_init(config_ptr);
 
+	/* Register with underlying BLE stack */
+    blebrr_register();
+    /* Register GATT Bearer Connection/Disconnection Event Hook */
+//    blebrr_register_gatt_iface_event_pl(UI_gatt_iface_event_pl_cb);
 	/* register element and models */
     init_models();
-	
+	UI_model_states_initialization();
+	UI_set_brr_scan_rsp_data();
+	EM_start_timer (&prov_thandle, 3, timeout_prov_state_cb, NULL, 0);
+//	UI_model_states_initialization();
     return 0;
 }
 /**
@@ -804,7 +596,10 @@ int mible_mesh_device_set_network_transmit_param(uint8_t count, uint8_t interval
 {
     MI_LOG_WARNING("[mible_mesh_gateway_set_network_transmit_param] \n");
     // TODO: Store in rom
-	return MS_access_cm_set_transmit_state(MS_NETWORK_TX_STATE,interval_steps);
+    ms_tx_state[MS_NETWORK_TX_STATE].tx_count = count & 0x07;
+	ms_tx_state[MS_NETWORK_TX_STATE].tx_steps = interval_steps;
+	MS_access_ps_store_all_record();
+	return 0;
 }
 
 /**
@@ -817,7 +612,10 @@ int mible_mesh_device_set_network_transmit_param(uint8_t count, uint8_t interval
 int mible_mesh_device_set_relay(uint8_t enabled, uint8_t count, uint8_t interval)
 {
 	MS_access_cm_set_features_field(enabled, MS_FEATURE_RELAY);
-   	return MS_access_cm_set_transmit_state(MS_RELAY_TX_STATE,interval);
+	ms_tx_state[MS_RELAY_TX_STATE].tx_count = count & 0x07;
+	ms_tx_state[MS_RELAY_TX_STATE].tx_steps = interval;
+	MS_access_ps_store_all_record();
+   	return 0;
 }
 
 /**
@@ -846,7 +644,13 @@ int mible_mesh_device_set_nettx(uint8_t ttl, uint8_t count, uint8_t interval)
 	API_RESULT retval;
 	retval = MS_access_cm_set_default_ttl(ttl);
 	if(retval == API_SUCCESS)
-		return MS_access_cm_set_transmit_state(MS_NETWORK_TX_STATE,interval);
+
+	{
+		ms_tx_state[MS_NETWORK_TX_STATE].tx_count = count & 0x07;
+		ms_tx_state[MS_NETWORK_TX_STATE].tx_steps = interval;
+		MS_access_ps_store_all_record();
+	}
+	return 0;
 }
 
 /**
@@ -877,6 +681,7 @@ int mible_mesh_device_get_nettx(uint8_t *ttl, uint8_t *count, uint8_t *step)
 int mible_mesh_device_set_seq(uint16_t element, uint32_t seq)
 {
 	net_seq_number_state.seq_num = seq;
+	MS_access_ps_store_all_record();
     return 0;
 }
 
@@ -936,24 +741,30 @@ int mible_mesh_device_set_netkey(mible_mesh_op_t op, uint16_t netkey_index, uint
 	API_RESULT retval;
 	MS_SUBNET_HANDLE subnet;
 	UINT32 opcode;
-	UINT32 index, add_index;
-	UCHAR	match_found = MS_FALSE;
+//	UINT32 index, add_index;
+//	UCHAR	match_found = MS_FALSE;
 	
 	//op add/update
 	if(op == MIBLE_MESH_OP_ADD)
 	{
 		opcode = MS_ACCESS_CONFIG_NETKEY_ADD_OPCODE;
 		
-		return MS_access_cm_add_update_netkey(netkey_index,opcode,netkey); 
+		retval = MS_access_cm_add_update_netkey(netkey_index,opcode,netkey); 
+	}
+	if(op == MIBLE_MESH_OP_OVERWRITE)
+	{
+		opcode = MS_ACCESS_CONFIG_NETKEY_UPDATE_OPCODE;
+		
+		retval = MS_access_cm_add_update_netkey(netkey_index,opcode,netkey); 
 	}
 	else if(op == MIBLE_MESH_OP_DELETE) //del
 	{
 		retval = MS_access_cm_find_subnet(netkey_index,&subnet);
 		if(retval == API_SUCCESS)
-			return MS_access_cm_delete_netkey(subnet);
+			retval =  MS_access_cm_delete_netkey(subnet);
 		
 	}	
-
+	return retval;
 }
 
 /**
@@ -1028,7 +839,7 @@ int mible_mesh_device_set_appkey(mible_mesh_op_t op, uint16_t netkey_index, uint
  */
 int mible_mesh_device_set_model_app(mible_mesh_op_t op, uint16_t elem_index, uint16_t company_id, uint16_t model_id, uint16_t appkey_index)
 {
-   API_RESULT retval;
+//   API_RESULT retval;
 	MS_ACCESS_MODEL_HANDLE model_handle;
 	MS_ACCESS_MODEL_ID id;
 	id.id = model_id;
@@ -1036,7 +847,7 @@ int mible_mesh_device_set_model_app(mible_mesh_op_t op, uint16_t elem_index, uin
 		id.type = MS_ACCESS_MODEL_TYPE_SIG;
 	else
 		id.type = MS_ACCESS_MODEL_TYPE_VENDOR;
-	retval = MS_access_get_model_handle(elem_index,id,&model_handle);
+	MS_access_get_model_handle(elem_index,id,&model_handle);
     if(op == MIBLE_MESH_OP_ADD){
         // bind model appkey_index
         return MS_access_bind_model_app(model_handle,appkey_index);
@@ -1069,7 +880,7 @@ int mible_mesh_device_set_presub_address(mible_mesh_op_t op, uint16_t sub_addr)
  */
 int mible_mesh_device_set_sub_address(mible_mesh_op_t op, uint16_t element, uint16_t company_id, uint16_t model_id, uint16_t sub_addr)
 {
-    API_RESULT retval;
+//    API_RESULT retval;
 	MS_ACCESS_MODEL_HANDLE model_handle;
 	MS_ACCESS_ADDRESS       subp_addr;
 	subp_addr.addr = sub_addr;
@@ -1079,7 +890,7 @@ int mible_mesh_device_set_sub_address(mible_mesh_op_t op, uint16_t element, uint
 		id.type = MS_ACCESS_MODEL_TYPE_SIG;
 	else
 		id.type = MS_ACCESS_MODEL_TYPE_VENDOR;
-	retval = MS_access_get_model_handle(element,id,&model_handle);
+	MS_access_get_model_handle(element,id,&model_handle);
     if(op == MIBLE_MESH_OP_ADD)
 	{
         // add subscription

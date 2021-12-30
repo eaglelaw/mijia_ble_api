@@ -25,7 +25,8 @@
 #define MAX_GATT_DB_NUM                      4 //To support multi services
 #define GATT_TABLE_VALUE_ALLOC               1
 
-
+extern void* osal_bm_alloc( uint16 size );
+extern void osal_bm_free( void* payload_ptr );
 
 typedef struct
 {
@@ -420,12 +421,12 @@ static uint32_t calculate_service_db(mible_gatts_srv_db_t *pservice,
         }
     }
 
-    MI_LOG_DEBUG("service table count = %d", size);
+//    MI_LOG_DEBUG("service table count = %d", size);
     if(pservice_db == NULL){
-      attr_db_size = size * sizeof(gattAttribute_t) + size * 2 + (uint32_t)p_uuid + (uint32_t)p_value;
+      attr_db_size = size * sizeof(gattAttribute_t) + size * 4 + (uint32_t)p_uuid + (uint32_t)p_value;
       *vlen_offset = size * sizeof(gattAttribute_t);
-      *uuid_offset = size * sizeof(gattAttribute_t) + size * 2;
-      *value_offset = size * sizeof(gattAttribute_t) + size * 2 + (uint32_t)p_uuid;
+      *uuid_offset = size * sizeof(gattAttribute_t) + size * 4;
+      *value_offset = size * sizeof(gattAttribute_t) + size * 4 + (uint32_t)p_uuid;
       return attr_db_size;
     }
     return size;
@@ -458,10 +459,11 @@ static service_db_t *request_service_db(void)
 mible_status_t mible_gatts_service_init(mible_gatts_db_t *p_server_db)
 {
     mible_gatts_srv_db_t *pservice = NULL;
-    mible_gatts_char_db_t *pcharacter = NULL;
-    mible_gatts_char_desc_db_t *pdescriptor = NULL;
-    uint32_t service_table_size = 0;
+//    mible_gatts_char_db_t *pcharacter = NULL;
+//    mible_gatts_char_desc_db_t *pdescriptor = NULL;
+    volatile uint32_t service_table_size = 0;
     service_db_t *psrv_db = NULL;
+//		LOG("cb %x\n",p_server_db->p_srv_db);
     /* validation database space */
     uint8_t unused_count = 0;
     for (uint8_t i = 0; i < MAX_GATT_DB_NUM; ++i)
@@ -491,7 +493,7 @@ mible_status_t mible_gatts_service_init(mible_gatts_db_t *p_server_db)
 
         /* allocate service table */
         service_table_size = calculate_service_db(pservice, NULL, 
-                                                  &vlen_offset,  &uuid_offset, &uuid_offset);
+                                                  &vlen_offset,  &uuid_offset, &value_offset);
         psrv_db->service.attrs = (gattAttribute_t *)osal_bm_alloc(service_table_size);
         if (NULL == psrv_db->service.attrs)
         {
@@ -505,15 +507,18 @@ mible_status_t mible_gatts_service_init(mible_gatts_db_t *p_server_db)
                                                          psrv_db,
                                                          &vlen_offset,
                                                          &uuid_offset,
-                                                         &uuid_offset);
+                                                         &value_offset);
         
         {
+        	LOG("p %d\n",psrv_db->service.numAttrs);
           uint8_t status = GATT_RegisterService( &(psrv_db->service));
+		  LOG("status %x\n",status);
           if ( status == SUCCESS )
           {
             // Register the service CBs with GATT Server Application
             status = gattServApp_RegisterServiceCBs( GATT_SERVICE_HANDLE(psrv_db->service.attrs),
                                                        mi_gatt_server_cbs );
+			LOG("status1 %x\n",status);
           }
           else
           {
@@ -729,14 +734,13 @@ mible_status_t mible_gatts_notify_or_indicate(uint16_t conn_handle,
     pindicate->len = offset + len;
     memcpy(pattr->pValue + offset, p_value, len);
     memcpy(pindicate->value, pattr->pValue, pindicate->len);
-    ret = GATT_Indication(conn_handle, pindicate, FALSE, get_taskID());
+//    ret = GATT_Indication(conn_handle, pindicate, FALSE, get_taskID());
     
     osal_bm_free(pindicate);
 
   }
 
   return err_code_convert(ret);
-  ;
 }
 
 /**
